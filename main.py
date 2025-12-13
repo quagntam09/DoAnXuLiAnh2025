@@ -1,4 +1,7 @@
-from ui.main_window import create_app
+import tkinter as tk
+from ui.main_window import PhotomosaicApp
 
 if __name__ == "__main__":
-    create_app()
+    root = tk.Tk()
+    app = PhotomosaicApp(root)
+    root.mainloop()

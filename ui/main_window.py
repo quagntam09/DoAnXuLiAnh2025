@@ -1,83 +1,147 @@
 import tkinter as tk
-from tkinter import messagebox
-import random
-import math
+from tkinter import filedialog, messagebox, ttk
+from PIL import Image, ImageTk
+import os
+import threading
+import cv2 # Chỉ import cv2 ở đây để convert màu hiển thị lên UI
 
-from algorithms.kdtree_module import KDTree
+# IMPORT LOGIC TỪ MODULE KHÁC
+from algorithms.mosaic_core import MosaicGenerator
 
-class KDTreeVisualizer:
+class PhotomosaicApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("KD-Tree Nearest Neighbor Visualizer")
+        self.root.title("Super Mosaic - MVC Separation Architecture")
+        self.root.geometry("1200x850")
         
-        self.width = 800
-        self.height = 600
+        self.target_image_path = None
+        self.tiles_folder_path = None
+        self.tk_image_display = None 
         
-        control_frame = tk.Frame(root, pady=10)
-        control_frame.pack(side=tk.TOP, fill=tk.X)
+        self._setup_ui()
 
-        self.btn_gen = tk.Button(control_frame, text="1. Sinh dữ liệu ngẫu nhiên", command=self.generate_data, bg="#dddddd")
-        self.btn_gen.pack(side=tk.LEFT, padx=10)
-
-        tk.Label(control_frame, text="2. Click chuột vào vùng trắng để tìm điểm gần nhất", fg="blue").pack(side=tk.LEFT, padx=20)
+    def _setup_ui(self):
+        # --- KHUNG TRÁI ---
+        control_frame = tk.Frame(self.root, width=320, bg="#f5f5f5", padx=20, pady=20)
+        control_frame.pack(side=tk.LEFT, fill=tk.Y)
         
-        self.lbl_info = tk.Label(control_frame, text="Distance: ...", font=("Arial", 10, "bold"))
-        self.lbl_info.pack(side=tk.RIGHT, padx=20)
+        tk.Label(control_frame, text="BẢNG ĐIỀU KHIỂN", font=("Segoe UI", 14, "bold"), bg="#f5f5f5").pack(pady=(0, 20))
 
-        self.canvas = tk.Canvas(root, width=self.width, height=self.height, bg="white", cursor="cross")
-        self.canvas.pack()
+        # 1. Input Ảnh
+        tk.Label(control_frame, text="1. Ảnh Gốc:", bg="#f5f5f5", font=("Segoe UI", 10, "bold")).pack(fill=tk.X)
+        tk.Button(control_frame, text="📂 Chọn Ảnh Gốc", command=self.select_target_image, bg="white").pack(fill=tk.X, pady=5)
+        self.lbl_img_path = tk.Label(control_frame, text="...", fg="gray", bg="#f5f5f5", wraplength=280)
+        self.lbl_img_path.pack(fill=tk.X, pady=(0, 15))
 
-        self.canvas.bind("<Button-1>", self.on_canvas_click)
+        # 2. Input Folder
+        tk.Label(control_frame, text="2. Folder Tiles:", bg="#f5f5f5", font=("Segoe UI", 10, "bold")).pack(fill=tk.X)
+        tk.Button(control_frame, text="📂 Chọn Folder Tiles", command=self.select_tile_folder, bg="white").pack(fill=tk.X, pady=5)
+        self.lbl_folder_path = tk.Label(control_frame, text="...", fg="gray", bg="#f5f5f5", wraplength=280)
+        self.lbl_folder_path.pack(fill=tk.X, pady=(0, 15))
 
-        self.points = []
-        self.tree = None
-        self.target_id = None 
-        self.line_id = None   
+        # 3. Thông số
+        tk.Label(control_frame, text="3. Kích thước Tile (px):", bg="#f5f5f5", font=("Segoe UI", 10, "bold")).pack(fill=tk.X)
+        self.entry_tile_size = tk.Entry(control_frame, font=("Segoe UI", 11))
+        self.entry_tile_size.insert(0, "20")
+        self.entry_tile_size.pack(fill=tk.X, pady=5)
 
-    def generate_data(self):
-        self.points = []
-        self.canvas.delete("all") 
+        tk.Label(control_frame, text="4. Blending (0.0 - 0.8):", bg="#f5f5f5", font=("Segoe UI", 10, "bold")).pack(fill=tk.X, pady=(15, 0))
+        self.slider_blend = tk.Scale(control_frame, from_=0.0, to=0.8, resolution=0.05, orient=tk.HORIZONTAL, bg="#f5f5f5")
+        self.slider_blend.set(0.2)
+        self.slider_blend.pack(fill=tk.X)
+
+        # Nút Chạy
+        self.btn_run = tk.Button(control_frame, text="🚀 TẠO ẢNH (Logic Separate)", command=self.on_click_run, 
+                                 bg="#28a745", fg="white", font=("Segoe UI", 12, "bold"), height=2)
+        self.btn_run.pack(fill=tk.X, pady=30)
         
-        for _ in range(50):
-            x = random.randint(20, self.width - 20)
-            y = random.randint(20, self.height - 20)
-            self.points.append([x, y])
-            
-            r = 3
-            self.canvas.create_oval(x-r, y-r, x+r, y+r, fill="black")
+        # Progress
+        self.lbl_status = tk.Label(control_frame, text="Sẵn sàng", bg="#f5f5f5", fg="#007bff")
+        self.lbl_status.pack(side=tk.BOTTOM, pady=5)
+        self.progress = ttk.Progressbar(control_frame, orient=tk.HORIZONTAL, mode='determinate')
+        self.progress.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
 
+        # --- KHUNG PHẢI (Display) ---
+        display_frame = tk.Frame(self.root, bg="#222")
+        display_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        self.canvas_label = tk.Label(display_frame, text="Ảnh kết quả sẽ hiện ở đây", bg="#222", fg="#888")
+        self.canvas_label.pack(expand=True)
+
+    # --- UI EVENT HANDLERS ---
+    def select_target_image(self):
+        path = filedialog.askopenfilename(filetypes=[("Images", "*.jpg *.png *.jpeg")])
+        if path:
+            self.target_image_path = path
+            self.lbl_img_path.config(text=os.path.basename(path))
+            self.show_image_preview(path)
+
+    def select_tile_folder(self):
+        path = filedialog.askdirectory()
+        if path:
+            self.tiles_folder_path = path
+            self.lbl_folder_path.config(text=os.path.basename(path))
+
+    def show_image_preview(self, img_source):
+        # Xử lý hiển thị ảnh (từ path hoặc từ array)
+        if isinstance(img_source, str):
+            img = Image.open(img_source)
+        else:
+            img = Image.fromarray(cv2.cvtColor(img_source, cv2.COLOR_BGR2RGB))
+        
+        base_height = 800
+        h_percent = (base_height / float(img.size[1]))
+        w_size = int((float(img.size[0]) * float(h_percent)))
+        img = img.resize((w_size, base_height), Image.Resampling.LANCZOS)
+        
+        self.tk_image_display = ImageTk.PhotoImage(img)
+        self.canvas_label.config(image=self.tk_image_display, text="")
+
+    # --- KẾT NỐI VỚI LOGIC ---
+    def on_click_run(self):
+        # 1. Validate dữ liệu
+        if not self.target_image_path or not self.tiles_folder_path:
+            messagebox.showerror("Thiếu thông tin", "Vui lòng chọn đủ ảnh và folder!")
+            return
+        
         try:
-            self.tree = KDTree(self.points)
-            messagebox.showinfo("Thành công", "Đã xây dựng KD-Tree với 50 điểm ngẫu nhiên!")
-        except Exception as e:
-            messagebox.showerror("Lỗi", f"Lỗi xây dựng cây: {e}")
-
-    def on_canvas_click(self, event):
-        if not self.tree:
-            messagebox.showwarning("Chưa có dữ liệu", "Vui lòng nhấn nút 'Sinh dữ liệu ngẫu nhiên' trước!")
+            tile_size = int(self.entry_tile_size.get())
+            blend = self.slider_blend.get()
+        except:
+            messagebox.showerror("Lỗi", "Thông số không hợp lệ")
             return
 
-        target = [event.x, event.y]
-
-        nearest_point, distance = self.tree.find_nearest(target)
-
-        self.draw_result(target, nearest_point, distance)
-
-    def draw_result(self, target, nearest, distance):
-        self.canvas.delete("result_layer")
-
-        tx, ty = target
-        r = 5
-        self.canvas.create_oval(tx-r, ty-r, tx+r, ty+r, fill="red", outline="red", tags="result_layer")
+        # 2. Khóa UI
+        self.btn_run.config(state=tk.DISABLED, text="Đang xử lý...")
         
-        nx, ny = nearest
-        self.canvas.create_line(tx, ty, nx, ny, fill="blue", dash=(4, 4), width=2, tags="result_layer")
+        # 3. Khởi tạo Logic Object
+        self.processor = MosaicGenerator(
+            target_path=self.target_image_path,
+            tiles_folder=self.tiles_folder_path,
+            tile_size=tile_size,
+            blend_factor=blend
+        )
 
-        self.canvas.create_oval(nx-6, ny-6, nx+6, ny+6, outline="green", width=3, tags="result_layer")
+        # 4. Chạy Thread (để không đơ UI)
+        threading.Thread(target=self.run_process_thread, daemon=True).start()
 
-        self.lbl_info.config(text=f"Khoảng cách: {distance:.2f} px")
+    def run_process_thread(self):
+        try:
+            # Gọi hàm RUN của Logic và truyền callback vào
+            out_path, result_img = self.processor.run(self.update_progress_safe)
+            
+            # Xử lý khi xong
+            self.root.after(0, lambda: self.show_image_preview(result_img))
+            self.root.after(0, lambda: messagebox.showinfo("Thành công", f"Đã lưu ảnh tại: {out_path}"))
+            
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("Lỗi", str(e)))
+        finally:
+            self.root.after(0, lambda: self.btn_run.config(state=tk.NORMAL, text="🚀 TẠO ẢNH"))
 
-def create_app():
-    root = tk.Tk()
-    app = KDTreeVisualizer(root)
-    root.mainloop()
+    def update_progress_safe(self, percent, message):
+        """Hàm này thread logic sẽ gọi để cập nhật UI"""
+        self.root.after(0, lambda: self._update_ui_elements(percent, message))
+
+    def _update_ui_elements(self, percent, message):
+        self.progress['value'] = percent
+        self.lbl_status.config(text=message)
