@@ -3,9 +3,8 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 import os
 import threading
-import cv2 # Chỉ import cv2 ở đây để convert màu hiển thị lên UI
+import cv2
 
-# IMPORT LOGIC TỪ MODULE KHÁC
 from algorithms.mosaic_core import MosaicGenerator
 
 class PhotomosaicApp:
@@ -29,13 +28,13 @@ class PhotomosaicApp:
 
         # 1. Input Ảnh
         tk.Label(control_frame, text="1. Ảnh Gốc:", bg="#f5f5f5", font=("Segoe UI", 10, "bold")).pack(fill=tk.X)
-        tk.Button(control_frame, text="📂 Chọn Ảnh Gốc", command=self.select_target_image, bg="white").pack(fill=tk.X, pady=5)
+        tk.Button(control_frame, text="Chọn Ảnh Gốc", command=self.select_target_image, bg="white").pack(fill=tk.X, pady=5)
         self.lbl_img_path = tk.Label(control_frame, text="...", fg="gray", bg="#f5f5f5", wraplength=280)
         self.lbl_img_path.pack(fill=tk.X, pady=(0, 15))
 
         # 2. Input Folder
         tk.Label(control_frame, text="2. Folder Tiles:", bg="#f5f5f5", font=("Segoe UI", 10, "bold")).pack(fill=tk.X)
-        tk.Button(control_frame, text="📂 Chọn Folder Tiles", command=self.select_tile_folder, bg="white").pack(fill=tk.X, pady=5)
+        tk.Button(control_frame, text="Chọn Folder Tiles", command=self.select_tile_folder, bg="white").pack(fill=tk.X, pady=5)
         self.lbl_folder_path = tk.Label(control_frame, text="...", fg="gray", bg="#f5f5f5", wraplength=280)
         self.lbl_folder_path.pack(fill=tk.X, pady=(0, 15))
 
@@ -51,7 +50,7 @@ class PhotomosaicApp:
         self.slider_blend.pack(fill=tk.X)
 
         # Nút Chạy
-        self.btn_run = tk.Button(control_frame, text="🚀 TẠO ẢNH (Logic Separate)", command=self.on_click_run, 
+        self.btn_run = tk.Button(control_frame, text="TẠO ẢNH (Logic Separate)", command=self.on_click_run, 
                                  bg="#28a745", fg="white", font=("Segoe UI", 12, "bold"), height=2)
         self.btn_run.pack(fill=tk.X, pady=30)
         
@@ -121,7 +120,6 @@ class PhotomosaicApp:
             blend_factor=blend
         )
 
-        # 4. Chạy Thread (để không đơ UI)
         threading.Thread(target=self.run_process_thread, daemon=True).start()
 
     def run_process_thread(self):
@@ -129,17 +127,19 @@ class PhotomosaicApp:
             # Gọi hàm RUN của Logic và truyền callback vào
             out_path, result_img = self.processor.run(self.update_progress_safe)
             
-            # Xử lý khi xong
+            # Xử lý khi xong (Dùng lambda vẫn an toàn với các biến local bình thường)
             self.root.after(0, lambda: self.show_image_preview(result_img))
             self.root.after(0, lambda: messagebox.showinfo("Thành công", f"Đã lưu ảnh tại: {out_path}"))
             
         except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror("Lỗi", str(e)))
+
+            error_message = str(e) 
+            self.root.after(0, lambda: messagebox.showerror("Lỗi", error_message))
+            
         finally:
-            self.root.after(0, lambda: self.btn_run.config(state=tk.NORMAL, text="🚀 TẠO ẢNH"))
+            self.root.after(0, lambda: self.btn_run.config(state=tk.NORMAL, text="TẠO ẢNH (Logic Separate)"))
 
     def update_progress_safe(self, percent, message):
-        """Hàm này thread logic sẽ gọi để cập nhật UI"""
         self.root.after(0, lambda: self._update_ui_elements(percent, message))
 
     def _update_ui_elements(self, percent, message):
