@@ -4,6 +4,7 @@ from PIL import Image, ImageTk
 import os
 import threading
 import cv2
+import shutil
 
 from algorithms.mosaic_core import MosaicGenerator
 
@@ -16,6 +17,7 @@ class PhotomosaicApp:
         self.target_image_path = None
         self.tiles_folder_path = None
         self.tk_image_display = None 
+        self.current_result_path = None # Đường dẫn ảnh kết quả tạm thời
         
         self._setup_ui()
 
@@ -49,10 +51,26 @@ class PhotomosaicApp:
         self.slider_blend.set(0.2)
         self.slider_blend.pack(fill=tk.X)
 
+        # 5. Upscale
+        tk.Label(control_frame, text="5. Độ phân giải ảnh ra (Upscale):", bg="#f5f5f5", font=("Segoe UI", 10, "bold")).pack(fill=tk.X, pady=(15, 0))
+        self.combo_scale = ttk.Combobox(control_frame, values=["1x (Mặc định)", "2x (Chi tiết)", "3x (Rất nét)", "4x (Siêu nét)"], state="readonly")
+        self.combo_scale.current(1) # Default 2x
+        self.combo_scale.pack(fill=tk.X, pady=5)
+
+        # 6. Adaptive Tiling
+        self.var_adaptive = tk.BooleanVar(value=False)
+        self.chk_adaptive = tk.Checkbutton(control_frame, text="6. Chế độ thông minh (Adaptive)", variable=self.var_adaptive, bg="#f5f5f5", font=("Segoe UI", 10))
+        self.chk_adaptive.pack(fill=tk.X, pady=(15, 0))
+
         # Nút Chạy
         self.btn_run = tk.Button(control_frame, text="TẠO ẢNH (Logic Separate)", command=self.on_click_run, 
                                  bg="#28a745", fg="white", font=("Segoe UI", 12, "bold"), height=2)
-        self.btn_run.pack(fill=tk.X, pady=30)
+        self.btn_run.pack(fill=tk.X, pady=(30, 10))
+
+        # Nút Lưu (Mới)
+        self.btn_save = tk.Button(control_frame, text="LƯU ẢNH KẾT QUẢ", command=self.save_image,
+                                  bg="#007bff", fg="white", font=("Segoe UI", 11, "bold"), height=2, state=tk.DISABLED)
+        self.btn_save.pack(fill=tk.X, pady=(0, 20))
         
         # Progress
         self.lbl_status = tk.Label(control_frame, text="Sẵn sàng", bg="#f5f5f5", fg="#007bff")
@@ -80,6 +98,25 @@ class PhotomosaicApp:
             self.tiles_folder_path = path
             self.lbl_folder_path.config(text=os.path.basename(path))
 
+    def save_image(self):
+        if not self.current_result_path or not os.path.exists(self.current_result_path):
+            messagebox.showerror("Lỗi", "Chưa có ảnh kết quả để lưu!")
+            return
+            
+        # Mở hộp thoại chọn nơi lưu
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".jpg",
+            filetypes=[("JPEG files", "*.jpg"), ("PNG files", "*.png"), ("All files", "*.*")],
+            title="Lưu ảnh Mosaic"
+        )
+        
+        if file_path:
+            try:
+                shutil.copy(self.current_result_path, file_path)
+                messagebox.showinfo("Thành công", f"Đã lưu ảnh tại:\n{file_path}")
+            except Exception as e:
+                messagebox.showerror("Lỗi lưu file", str(e))
+
     def show_image_preview(self, img_source):
         # Xử lý hiển thị ảnh (từ path hoặc từ array)
         if isinstance(img_source, str):
@@ -98,26 +135,40 @@ class PhotomosaicApp:
     # --- KẾT NỐI VỚI LOGIC ---
     def on_click_run(self):
         # 1. Validate dữ liệu
-        if not self.target_image_path or not self.tiles_folder_path:
-            messagebox.showerror("Thiếu thông tin", "Vui lòng chọn đủ ảnh và folder!")
+        # Chỉ bắt buộc chọn ảnh gốc. Tiles folder có thể để trống (để dùng mặc định/fallback)
+        if not self.target_image_path:
+            messagebox.showerror("Thiếu thông tin", "Vui lòng chọn ảnh gốc!")
             return
         
         try:
             tile_size = int(self.entry_tile_size.get())
             blend = self.slider_blend.get()
+            
+            # Lấy giá trị scale (kí tự đầu tiên)
+            scale_str = self.combo_scale.get()
+            scale_factor = int(scale_str[0]) 
+            
+            use_adaptive = self.var_adaptive.get()
+
         except:
             messagebox.showerror("Lỗi", "Thông số không hợp lệ")
             return
 
         # 2. Khóa UI
         self.btn_run.config(state=tk.DISABLED, text="Đang xử lý...")
+        self.btn_save.config(state=tk.DISABLED) # Disable nút lưu khi đang chạy mới
         
         # 3. Khởi tạo Logic Object
+        # Nếu chưa chọn folder, truyền None/Empty string để Core tự xử lý fallback
+        folder_to_use = self.tiles_folder_path if self.tiles_folder_path else ""
+
         self.processor = MosaicGenerator(
             target_path=self.target_image_path,
-            tiles_folder=self.tiles_folder_path,
+            tiles_folder=folder_to_use,
             tile_size=tile_size,
-            blend_factor=blend
+            blend_factor=blend,
+            scale_factor=scale_factor,
+            use_adaptive=use_adaptive
         )
 
         threading.Thread(target=self.run_process_thread, daemon=True).start()
@@ -127,9 +178,13 @@ class PhotomosaicApp:
             # Gọi hàm RUN của Logic và truyền callback vào
             out_path, result_img = self.processor.run(self.update_progress_safe)
             
+            # Lưu đường dẫn kết quả tạm thời
+            self.current_result_path = out_path
+
             # Xử lý khi xong (Dùng lambda vẫn an toàn với các biến local bình thường)
             self.root.after(0, lambda: self.show_image_preview(result_img))
-            self.root.after(0, lambda: messagebox.showinfo("Thành công", f"Đã lưu ảnh tại: {out_path}"))
+            self.root.after(0, lambda: messagebox.showinfo("Thành công", f"Đã tạo xong! Hãy bấm nút 'Lưu' để tải về."))
+            self.root.after(0, lambda: self.btn_save.config(state=tk.NORMAL)) # Enable nút lưu
             
         except Exception as e:
 
