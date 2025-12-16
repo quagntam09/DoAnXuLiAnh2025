@@ -1,14 +1,12 @@
 import tkinter as tk
 import ctypes
-from ui.main_window import PhotomosaicApp
+from ui.main_window import App
 
 if __name__ == "__main__":
-    # Kích hoạt High DPI để giao diện sắc nét trên Windows
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
         pass
 
-    root = tk.Tk()
-    app = PhotomosaicApp(root)
-    root.mainloop()
+    app = App()
+    app.mainloop()

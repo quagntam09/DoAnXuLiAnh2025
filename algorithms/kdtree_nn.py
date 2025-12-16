@@ -1,8 +1,7 @@
 import numpy as np
-from .kdtree_module import KDTree
+from algorithms.kdtree_module import KDTree
 
 class KDTreeNearestNeighbor:
-
     def __init__(self, colors_arr: np.ndarray):
         if colors_arr is None:
             raise ValueError("colors_arr is None")
@@ -19,5 +18,6 @@ class KDTreeNearestNeighbor:
         if color.shape[0] != 3:
             raise ValueError("color phải có shape (3,)")
 
+        # KD-Tree trả về (distance, index)
         _, idx = self.tree.query(color)
         return int(idx)

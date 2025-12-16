@@ -1,202 +1,266 @@
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
-from PIL import Image, ImageTk
 import os
 import threading
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
 import cv2
-import shutil
+import numpy as np
+from PIL import Image, ImageTk
 
+# Import core thuật toán
 from algorithms.mosaic_core import MosaicGenerator
 
-class PhotomosaicApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Super Mosaic - MVC Separation Architecture")
-        self.root.geometry("1200x850")
+# --- HÀM HỖ TRỢ HIỂN THỊ ẢNH ---
+def bgr_to_tk(img_bgr: np.ndarray, max_w=800, max_h=800) -> ImageTk.PhotoImage:
+    """Chuyển đổi ảnh OpenCV (BGR) sang ảnh Tkinter để hiển thị, có resize giữ tỉ lệ."""
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    h, w = img_rgb.shape[:2]
+
+    # Tính tỉ lệ scale để fit vào khung hình
+    scale = min(max_w / w, max_h / h, 1.0)
+    
+    # Chỉ resize nếu ảnh lớn hơn khung
+    if scale < 1.0:
+        nw, nh = int(w * scale), int(h * scale)
+        img_rgb = cv2.resize(img_rgb, (nw, nh), interpolation=cv2.INTER_AREA)
+
+    pil = Image.fromarray(img_rgb)
+    return ImageTk.PhotoImage(pil)
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Phần Mềm Tạo Tranh Mosaic Nghệ Thuật")
+        self.geometry("1200x800")
+        self.minsize(1000, 700)
         
-        self.target_image_path = None
-        self.tiles_folder_path = None
-        self.tk_image_display = None 
-        self.current_result_path = None # Đường dẫn ảnh kết quả tạm thời
+        # Style theme
+        style = ttk.Style(self)
+        style.theme_use('clam') # Hoặc 'alt', 'default' tùy OS
+        style.configure("TLabel", font=("Segoe UI", 10))
+        style.configure("TButton", font=("Segoe UI", 10, "bold"), padding=6)
+        style.configure("Header.TLabel", font=("Segoe UI", 12, "bold"), foreground="#333")
+
+        # --- Variables ---
+        self.target_path = tk.StringVar(value="")
+        self.tiles_folder = tk.StringVar(value="")
         
-        self._setup_ui()
-
-    def _setup_ui(self):
-        # --- KHUNG TRÁI ---
-        control_frame = tk.Frame(self.root, width=320, bg="#f5f5f5", padx=20, pady=20)
-        control_frame.pack(side=tk.LEFT, fill=tk.Y)
+        # Giá trị mặc định
+        self.tile_size = tk.IntVar(value=15)
+        self.levels = tk.IntVar(value=3)
+        self.blend = tk.DoubleVar(value=0.2)
         
-        tk.Label(control_frame, text="BẢNG ĐIỀU KHIỂN", font=("Segoe UI", 14, "bold"), bg="#f5f5f5").pack(pady=(0, 20))
+        self._current_img = None  # Lưu ảnh gốc
+        self._result_img = None   # Lưu ảnh kết quả
+        self._photo = None        # Giữ reference cho Tkinter khỏi bị garbage collect
 
-        # 1. Input Ảnh
-        tk.Label(control_frame, text="1. Ảnh Gốc:", bg="#f5f5f5", font=("Segoe UI", 10, "bold")).pack(fill=tk.X)
-        tk.Button(control_frame, text="Chọn Ảnh Gốc", command=self.select_target_image, bg="white").pack(fill=tk.X, pady=5)
-        self.lbl_img_path = tk.Label(control_frame, text="...", fg="gray", bg="#f5f5f5", wraplength=280)
-        self.lbl_img_path.pack(fill=tk.X, pady=(0, 15))
+        self._build_ui()
 
-        # 2. Input Folder
-        tk.Label(control_frame, text="2. Folder Tiles:", bg="#f5f5f5", font=("Segoe UI", 10, "bold")).pack(fill=tk.X)
-        tk.Button(control_frame, text="Chọn Folder Tiles", command=self.select_tile_folder, bg="white").pack(fill=tk.X, pady=5)
-        self.lbl_folder_path = tk.Label(control_frame, text="...", fg="gray", bg="#f5f5f5", wraplength=280)
-        self.lbl_folder_path.pack(fill=tk.X, pady=(0, 15))
+    def _build_ui(self):
+        # Layout chính: Trái (Controls) - Phải (Preview)
+        main_paned = tk.PanedWindow(self, orient="horizontal", sashwidth=5, bg="#dcdcdc")
+        main_paned.pack(fill="both", expand=True)
 
-        # 3. Thông số
-        tk.Label(control_frame, text="3. Kích thước Tile (px):", bg="#f5f5f5", font=("Segoe UI", 10, "bold")).pack(fill=tk.X)
-        self.entry_tile_size = tk.Entry(control_frame, font=("Segoe UI", 11))
-        self.entry_tile_size.insert(0, "20")
-        self.entry_tile_size.pack(fill=tk.X, pady=5)
+        # === PANEL TRÁI: ĐIỀU KHIỂN ===
+        left_frame = ttk.Frame(main_paned, padding=15)
+        main_paned.add(left_frame, minsize=350, width=380)
 
-        tk.Label(control_frame, text="4. Blending (0.0 - 0.8):", bg="#f5f5f5", font=("Segoe UI", 10, "bold")).pack(fill=tk.X, pady=(15, 0))
-        self.slider_blend = tk.Scale(control_frame, from_=0.0, to=0.8, resolution=0.05, orient=tk.HORIZONTAL, bg="#f5f5f5")
-        self.slider_blend.set(0.2)
-        self.slider_blend.pack(fill=tk.X)
+        # 1. Logo / Header
+        lbl_title = ttk.Label(left_frame, text="🛠 BẢNG ĐIỀU KHIỂN", style="Header.TLabel")
+        lbl_title.pack(anchor="w", pady=(0, 15))
 
-        # 5. Upscale
-        tk.Label(control_frame, text="5. Độ phân giải ảnh ra (Upscale):", bg="#f5f5f5", font=("Segoe UI", 10, "bold")).pack(fill=tk.X, pady=(15, 0))
-        self.combo_scale = ttk.Combobox(control_frame, values=["1x (Mặc định)", "2x (Chi tiết)", "3x (Rất nét)", "4x (Siêu nét)"], state="readonly")
-        self.combo_scale.current(1) # Default 2x
-        self.combo_scale.pack(fill=tk.X, pady=5)
+        # 2. Bước 1: Chọn dữ liệu
+        grp_input = ttk.LabelFrame(left_frame, text="1. Chọn Dữ Liệu", padding=10)
+        grp_input.pack(fill="x", pady=5)
 
-        # 6. Adaptive Tiling
-        self.var_adaptive = tk.BooleanVar(value=False)
-        self.chk_adaptive = tk.Checkbutton(control_frame, text="6. Chế độ thông minh (Adaptive)", variable=self.var_adaptive, bg="#f5f5f5", font=("Segoe UI", 10))
-        self.chk_adaptive.pack(fill=tk.X, pady=(15, 0))
+        # Nút chọn ảnh gốc
+        ttk.Label(grp_input, text="Ảnh gốc (Chủ đề):").pack(anchor="w")
+        btn_target = ttk.Button(grp_input, text="📂 Mở ảnh gốc...", command=self.pick_target)
+        btn_target.pack(fill="x", pady=(2, 8))
+        self.lbl_target_name = ttk.Label(grp_input, text="(Chưa chọn ảnh)", foreground="gray", wraplength=300)
+        self.lbl_target_name.pack(anchor="w", pady=(0, 10))
 
-        # Nút Chạy
-        self.btn_run = tk.Button(control_frame, text="TẠO ẢNH (Logic Separate)", command=self.on_click_run, 
-                                 bg="#28a745", fg="white", font=("Segoe UI", 12, "bold"), height=2)
-        self.btn_run.pack(fill=tk.X, pady=(30, 10))
+        # Nút chọn folder tiles
+        ttk.Label(grp_input, text="Kho ảnh ghép (Dataset):").pack(anchor="w")
+        btn_tiles = ttk.Button(grp_input, text="📂 Chọn thư mục ảnh nhỏ...", command=self.pick_tiles_folder)
+        btn_tiles.pack(fill="x", pady=(2, 8))
+        self.lbl_tiles_name = ttk.Label(grp_input, text="(Chưa chọn thư mục)", foreground="gray", wraplength=300)
+        self.lbl_tiles_name.pack(anchor="w")
 
-        # Nút Lưu (Mới)
-        self.btn_save = tk.Button(control_frame, text="LƯU ẢNH KẾT QUẢ", command=self.save_image,
-                                  bg="#007bff", fg="white", font=("Segoe UI", 11, "bold"), height=2, state=tk.DISABLED)
-        self.btn_save.pack(fill=tk.X, pady=(0, 20))
+        # 3. Bước 2: Cấu hình thuật toán
+        grp_config = ttk.LabelFrame(left_frame, text="2. Tùy Chỉnh Nghệ Thuật", padding=10)
+        grp_config.pack(fill="x", pady=15)
+
+        # Slider: Kích thước ô
+        self.lbl_tile_val = ttk.Label(grp_config, text=f"Kích thước ô nhỏ: {self.tile_size.get()} px")
+        self.lbl_tile_val.pack(anchor="w")
+        scale_tile = ttk.Scale(grp_config, from_=5, to=80, variable=self.tile_size, 
+                               command=lambda v: self.lbl_tile_val.config(text=f"Kích thước ô nhỏ: {int(float(v))} px"))
+        scale_tile.pack(fill="x", pady=(0, 10))
+
+        # Slider: Độ chi tiết (Levels)
+        self.lbl_level_val = ttk.Label(grp_config, text=f"Độ phân giải (Levels): {self.levels.get()}")
+        self.lbl_level_val.pack(anchor="w")
+        scale_level = ttk.Scale(grp_config, from_=1, to=6, variable=self.levels,
+                                command=lambda v: self.lbl_level_val.config(text=f"Độ phân giải (Levels): {int(float(v))}"))
+        scale_level.pack(fill="x", pady=(0, 10))
+
+        # Slider: Pha trộn
+        self.lbl_blend_val = ttk.Label(grp_config, text=f"Pha trộn ảnh gốc: {int(self.blend.get()*100)}%")
+        self.lbl_blend_val.pack(anchor="w")
+        scale_blend = ttk.Scale(grp_config, from_=0.0, to=1.0, variable=self.blend,
+                                command=lambda v: self.lbl_blend_val.config(text=f"Pha trộn ảnh gốc: {int(float(v)*100)}%"))
+        scale_blend.pack(fill="x")
+        ttk.Label(grp_config, text="(Kéo cao để ảnh rõ nét hơn, thấp để nghệ thuật hơn)", 
+                  font=("Arial", 8, "italic"), foreground="gray").pack(anchor="w")
+
+        # 4. Bước 3: Hành động
+        grp_action = ttk.LabelFrame(left_frame, text="3. Thực Hiện", padding=10)
+        grp_action.pack(fill="x", pady=5)
+
+        self.btn_run = ttk.Button(grp_action, text="▶ BẮT ĐẦU TẠO TRANH", command=self.run_mosaic)
+        self.btn_run.pack(fill="x", pady=5)
         
-        # Progress
-        self.lbl_status = tk.Label(control_frame, text="Sẵn sàng", bg="#f5f5f5", fg="#007bff")
-        self.lbl_status.pack(side=tk.BOTTOM, pady=5)
-        self.progress = ttk.Progressbar(control_frame, orient=tk.HORIZONTAL, mode='determinate')
-        self.progress.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
+        self.progress = ttk.Progressbar(grp_action, mode="determinate")
+        self.progress.pack(fill="x", pady=5)
+        
+        self.status = tk.StringVar(value="Sẵn sàng.")
+        self.lbl_status = ttk.Label(grp_action, textvariable=self.status, foreground="blue", wraplength=300)
+        self.lbl_status.pack(fill="x")
 
-        # --- KHUNG PHẢI (Display) ---
-        display_frame = tk.Frame(self.root, bg="#222")
-        display_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
-        self.canvas_label = tk.Label(display_frame, text="Ảnh kết quả sẽ hiện ở đây", bg="#222", fg="#888")
-        self.canvas_label.pack(expand=True)
+        # Nút Lưu (nằm riêng)
+        self.btn_save = ttk.Button(left_frame, text="💾 Lưu Kết Quả Về Máy", command=self.save_as, state="disabled")
+        self.btn_save.pack(fill="x", pady=20, side="bottom")
 
-    # --- UI EVENT HANDLERS ---
-    def select_target_image(self):
-        path = filedialog.askopenfilename(filetypes=[("Images", "*.jpg *.png *.jpeg")])
-        if path:
-            self.target_image_path = path
-            self.lbl_img_path.config(text=os.path.basename(path))
-            self.show_image_preview(path)
+        # === PANEL PHẢI: PREVIEW ===
+        right_frame = ttk.Frame(main_paned, padding=10)
+        main_paned.add(right_frame)
 
-    def select_tile_folder(self):
-        path = filedialog.askdirectory()
-        if path:
-            self.tiles_folder_path = path
-            self.lbl_folder_path.config(text=os.path.basename(path))
+        # Khung chứa ảnh (Canvas hoặc Label)
+        self.preview_container = tk.Label(right_frame, bg="#333333", text="Khu vực hiển thị ảnh", fg="white")
+        self.preview_container.pack(fill="both", expand=True)
 
-    def save_image(self):
-        if not self.current_result_path or not os.path.exists(self.current_result_path):
-            messagebox.showerror("Lỗi", "Chưa có ảnh kết quả để lưu!")
-            return
-            
-        # Mở hộp thoại chọn nơi lưu
-        file_path = filedialog.asksaveasfilename(
-            defaultextension=".jpg",
-            filetypes=[("JPEG files", "*.jpg"), ("PNG files", "*.png"), ("All files", "*.*")],
-            title="Lưu ảnh Mosaic"
+    # --- LOGIC XỬ LÝ ---
+
+    def pick_target(self):
+        path = filedialog.askopenfilename(
+            title="Chọn ảnh gốc",
+            filetypes=[("Image Files", "*.jpg *.jpeg *.png *.bmp *.webp")]
         )
+        if not path:
+            return
         
-        if file_path:
+        # Reset
+        self.target_path.set(path)
+        self.lbl_target_name.config(text=f"✔ {os.path.basename(path)}", foreground="green")
+        
+        # Load & Show
+        img = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            messagebox.showerror("Lỗi", "File ảnh bị lỗi hoặc không hỗ trợ!")
+            return
+
+        self._current_img = img
+        self._result_img = None
+        self.btn_save.config(state="disabled")
+        self.show_image(img)
+        self.status.set(f"Đã tải ảnh gốc.")
+
+    def pick_tiles_folder(self):
+        folder = filedialog.askdirectory(title="Chọn thư mục chứa tập ảnh nhỏ")
+        if folder:
+            self.tiles_folder.set(folder)
+            self.lbl_tiles_name.config(text=f"✔ .../{os.path.basename(folder)}", foreground="green")
+            self.status.set("Đã chọn kho ảnh mẫu.")
+
+    def show_image(self, img_bgr: np.ndarray):
+        # Lấy kích thước thực tế của khung hiển thị để resize cho vừa vặn
+        w = self.preview_container.winfo_width()
+        h = self.preview_container.winfo_height()
+        if w < 100: w = 800 # Fallback khi chưa render xong
+        if h < 100: h = 600
+
+        self._photo = bgr_to_tk(img_bgr, max_w=w, max_h=h)
+        self.preview_container.configure(image=self._photo, text="")
+
+    def run_mosaic(self):
+        target = self.target_path.get().strip()
+        tiles = self.tiles_folder.get().strip()
+
+        if not target or not os.path.exists(target):
+            messagebox.showwarning("Thiếu thông tin", "Vui lòng chọn 'Ảnh gốc' trước!")
+            return
+        if not tiles or not os.path.isdir(tiles):
+            messagebox.showwarning("Thiếu thông tin", "Vui lòng chọn 'Kho ảnh ghép' trước!")
+            return
+
+        # Khóa giao diện
+        self.btn_run.config(state="disabled")
+        self.btn_save.config(state="disabled")
+        self.progress["value"] = 0
+        self.status.set("Đang khởi động thuật toán...")
+
+        # Params
+        t_size = int(self.tile_size.get())
+        levs = int(self.levels.get())
+        bl = float(self.blend.get())
+
+        # Callbacks cập nhật UI từ Thread
+        def on_progress(p, msg):
+            self.after(0, lambda: self.progress.configure(value=float(p)))
+            self.after(0, lambda: self.status.set(msg))
+
+        def on_frame(frame_img):
+            # Copy để tránh conflict memory khi đang render
+            show_img = frame_img.copy()
+            self.after(0, lambda: self.show_image(show_img))
+
+        def worker_thread():
             try:
-                shutil.copy(self.current_result_path, file_path)
-                messagebox.showinfo("Thành công", f"Đã lưu ảnh tại:\n{file_path}")
+                gen = MosaicGenerator(
+                    target_path=target,
+                    tiles_folder=tiles,
+                    tile_size=t_size,
+                    blend_factor=bl,
+                    levels=levs,
+                    frame_every=150 # Cập nhật preview mượt hơn
+                )
+                
+                # Chạy thuật toán
+                final_img = gen.run(progress_callback=on_progress, frame_callback=on_frame)
+                
+                # Hoàn tất
+                self._result_img = final_img
+                self.after(0, lambda: self.show_image(final_img))
+                self.after(0, lambda: self.btn_save.config(state="normal"))
+                self.after(0, lambda: messagebox.showinfo("Hoàn tất", "Đã tạo tranh Mosaic thành công!"))
+                
             except Exception as e:
-                messagebox.showerror("Lỗi lưu file", str(e))
+                import traceback
+                traceback.print_exc()
+                self.after(0, lambda err=str(e): messagebox.showerror("Lỗi Runtime", f"Có lỗi xảy ra:\n{err}"))
+            finally:
+                self.after(0, lambda: self.btn_run.config(state="normal"))
+                self.after(0, lambda: self.status.set("Đã xong."))
 
-    def show_image_preview(self, img_source):
-        # Xử lý hiển thị ảnh (từ path hoặc từ array)
-        if isinstance(img_source, str):
-            img = Image.open(img_source)
-        else:
-            img = Image.fromarray(cv2.cvtColor(img_source, cv2.COLOR_BGR2RGB))
-        
-        base_height = 800
-        h_percent = (base_height / float(img.size[1]))
-        w_size = int((float(img.size[0]) * float(h_percent)))
-        img = img.resize((w_size, base_height), Image.Resampling.LANCZOS)
-        
-        self.tk_image_display = ImageTk.PhotoImage(img)
-        self.canvas_label.config(image=self.tk_image_display, text="")
+        threading.Thread(target=worker_thread, daemon=True).start()
 
-    # --- KẾT NỐI VỚI LOGIC ---
-    def on_click_run(self):
-        # 1. Validate dữ liệu
-        # Chỉ bắt buộc chọn ảnh gốc. Tiles folder có thể để trống (để dùng mặc định/fallback)
-        if not self.target_image_path:
-            messagebox.showerror("Thiếu thông tin", "Vui lòng chọn ảnh gốc!")
+    def save_as(self):
+        if self._result_img is None:
             return
-        
-        try:
-            tile_size = int(self.entry_tile_size.get())
-            blend = self.slider_blend.get()
-            
-            # Lấy giá trị scale (kí tự đầu tiên)
-            scale_str = self.combo_scale.get()
-            scale_factor = int(scale_str[0]) 
-            
-            use_adaptive = self.var_adaptive.get()
-
-        except:
-            messagebox.showerror("Lỗi", "Thông số không hợp lệ")
-            return
-
-        # 2. Khóa UI
-        self.btn_run.config(state=tk.DISABLED, text="Đang xử lý...")
-        self.btn_save.config(state=tk.DISABLED) # Disable nút lưu khi đang chạy mới
-        
-        # 3. Khởi tạo Logic Object
-        # Nếu chưa chọn folder, truyền None/Empty string để Core tự xử lý fallback
-        folder_to_use = self.tiles_folder_path if self.tiles_folder_path else ""
-
-        self.processor = MosaicGenerator(
-            target_path=self.target_image_path,
-            tiles_folder=folder_to_use,
-            tile_size=tile_size,
-            blend_factor=blend,
-            scale_factor=scale_factor,
-            use_adaptive=use_adaptive
+        path = filedialog.asksaveasfilename(
+            title="Lưu tác phẩm",
+            defaultextension=".jpg",
+            filetypes=[("JPG Image", "*.jpg"), ("PNG Image", "*.png")]
         )
+        if path:
+            success, buf = cv2.imencode(os.path.splitext(path)[1], self._result_img)
+            if success:
+                with open(path, "wb") as f:
+                    buf.tofile(f)
+                messagebox.showinfo("Đã lưu", f"Ảnh đã được lưu tại:\n{path}")
+            else:
+                messagebox.showerror("Lỗi", "Không thể lưu file.")
 
-        threading.Thread(target=self.run_process_thread, daemon=True).start()
-
-    def run_process_thread(self):
-        try:
-            # Gọi hàm RUN của Logic và truyền callback vào
-            out_path, result_img = self.processor.run(self.update_progress_safe)
-            
-            # Lưu đường dẫn kết quả tạm thời
-            self.current_result_path = out_path
-
-            # Xử lý khi xong (Dùng lambda vẫn an toàn với các biến local bình thường)
-            self.root.after(0, lambda: self.show_image_preview(result_img))
-            self.root.after(0, lambda: messagebox.showinfo("Thành công", f"Đã tạo xong! Hãy bấm nút 'Lưu' để tải về."))
-            self.root.after(0, lambda: self.btn_save.config(state=tk.NORMAL)) # Enable nút lưu
-            
-        except Exception as e:
-
-            error_message = str(e) 
-            self.root.after(0, lambda: messagebox.showerror("Lỗi", error_message))
-            
-        finally:
-            self.root.after(0, lambda: self.btn_run.config(state=tk.NORMAL, text="TẠO ẢNH (Logic Separate)"))
-
-    def update_progress_safe(self, percent, message):
-        self.root.after(0, lambda: self._update_ui_elements(percent, message))
-
-    def _update_ui_elements(self, percent, message):
-        self.progress['value'] = percent
-        self.lbl_status.config(text=message)
+if __name__ == "__main__":
+    app = App()
+    app.mainloop()
