@@ -1,21 +1,20 @@
 import numpy as np
+import cv2
 
-def extract(img: np.ndarray) -> np.ndarray:
-    """
-    Tính màu trung bình (B, G, R) của một ảnh.
-    Input: img (numpy array HxWxC)
-    Output: numpy array (3,)
-    """
+def extract(img: np.ndarray, use_texture=False) -> np.ndarray:
     if img is None:
         raise ValueError("Image is None")
+    
+    # 1. Tính màu trung bình (Mean)
+    mean_color = np.mean(img, axis=(0, 1)) # (3,)
 
-    if img.ndim != 3 or img.shape[2] != 3:
-        # Nếu là ảnh xám, convert dimension để xử lý thống nhất
-        if img.ndim == 2:
-            return np.mean(img).repeat(3).astype(np.float32)
-        raise ValueError(f"Invalid image shape: {img.shape}")
+    if not use_texture:
+        return mean_color.astype(np.float32)
 
-    # Tính mean theo trục H và W (axis 0 và 1)
-    avg_color = np.mean(img, axis=(0, 1))
+    # 2. Tính độ lệch chuẩn (Std Dev) để đại diện cho texture
+    # Ảnh nhiều chi tiết -> std cao, ảnh trơn -> std thấp
+    std_color = np.std(img, axis=(0, 1)) # (3,)
 
-    return avg_color.astype(np.float32)
+    # Kết hợp thành vector 6 chiều (cân trọng số nếu cần)
+    feature = np.concatenate([mean_color, std_color]) 
+    return feature.astype(np.float32)

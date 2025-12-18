@@ -2,33 +2,38 @@ import os
 import cv2
 import numpy as np
 import time
-from typing import Callable, List, Tuple
+from typing import Callable, List, Tuple, Dict
+import concurrent.futures
+from collections import deque
 
-# Sửa import để chạy flat structure
+# Import thuật toán lõi
 from algorithms.average_color import extract
 from algorithms.kdtree_nn import KDTreeNearestNeighbor
 
+# --- CẤU HÌNH ---
+# Trọng số cho thành phần Texture (StdDev) khi query KD-Tree.
+# < 1.0: Ưu tiên đúng màu hơn đúng vân.
+# > 1.0: Ưu tiên đúng vân hơn đúng màu.
+TEXTURE_WEIGHT = 0.8 
+
 def level_sizes(base_tile: int, levels: int = 3) -> List[int]:
-    if base_tile <= 0:
-        raise ValueError("base_tile phải > 0")
-    if levels <= 0:
-        raise ValueError("levels phải > 0")
+    """
+    Tính toán danh sách các kích thước tile cần chuẩn bị.
+    Đảm bảo tuân thủ quy tắc lũy thừa 2 để khớp với Quadtree.
+    Ví dụ base=10, levels=3 -> [40, 20, 10]
+    """
+    if base_tile <= 0: raise ValueError("base_tile phải > 0")
+    if levels <= 0: raise ValueError("levels phải > 0")
 
     sizes = []
-    # Level đầu tiên tile to nhất -> Mosaic thô nhất
-    s = base_tile * (2 ** (levels - 1))
-    for _ in range(levels):
-        sizes.append(int(s))
-        s //= 2
-        if s < base_tile: 
-            break
+    # Size lớn nhất
+    max_s = base_tile * (2 ** (levels - 1))
     
-    # Đảm bảo level cuối cùng chính xác là base_tile
-    if sizes[-1] != base_tile:
-        sizes.append(base_tile)
+    current = max_s
+    while current >= base_tile:
+        sizes.append(current)
+        current //= 2
         
-    # Loại bỏ trùng lặp và sort giảm dần
-    sizes = sorted(list(set(sizes)), reverse=True)
     return sizes
 
 def _list_image_files(folder: str):
@@ -40,182 +45,221 @@ def _list_image_files(folder: str):
                 files.append(os.path.join(root, name))
     return files
 
-def prepare_tiles_for_level(file_list: List[str], tile_size: int,
-                            progress_callback: Callable[[float, str], None] = None
-                            ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Đọc và resize ảnh tile về đúng kích thước tile_size.
-    Tính màu trung bình cho từng tile.
-    """
-    if progress_callback is None:
-        progress_callback = lambda p, msg: None
+def _process_one_tile(args):
+    """Xử lý 1 tile: Đọc -> Resize -> Trích xuất đặc trưng (Màu + Texture)"""
+    path, tile_size = args
+    try:
+        img = cv2.imread(path)
+        if img is None: return None
+        
+        # Resize về kích thước cần thiết
+        img_small = cv2.resize(img, (tile_size, tile_size), interpolation=cv2.INTER_AREA)
+        
+        # Trích xuất đặc trưng (Mean + Std nếu file extract hỗ trợ)
+        feature_vec = extract(img_small) 
+        
+        # Nếu feature có chứa texture (vector 6 chiều), ta scale phần texture
+        # để điều chỉnh độ ưu tiên
+        if feature_vec.shape[0] == 6:
+            feature_vec[3:] *= TEXTURE_WEIGHT
+            
+        return img_small, feature_vec
+    except Exception:
+        return None
 
+def prepare_tiles_parallel(file_list: List[str], tile_size: int,
+                            progress_callback: Callable[[float, str], None]) -> Tuple[np.ndarray, np.ndarray]:
+    """Load và xử lý tiles ban đầu (kích thước lớn nhất) bằng đa luồng."""
     tiles = []
-    colors = []
+    features = []
     total = len(file_list)
 
-    progress_callback(0, f"Đang xử lý tiles size {tile_size}px...")
+    progress_callback(0, f"Đang nạp {total} ảnh mẫu (size {tile_size}px)...")
 
-    for i, path in enumerate(file_list):
-        img = cv2.imread(path)
-        if img is None:
-            continue
-        
-        # Resize tile về kích thước grid hiện tại
-        try:
-            img_small = cv2.resize(img, (tile_size, tile_size), interpolation=cv2.INTER_AREA)
-        except Exception:
-            continue
+    tasks = [(path, tile_size) for path in file_list]
 
-        tiles.append(img_small)
-        colors.append(extract(img_small))  # (3,)
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        results = list(executor.map(_process_one_tile, tasks))
 
-        if i % 200 == 0: # Update progress mỗi 200 ảnh để đỡ lag
-            progress_callback((i / max(1, total)) * 100, f"Load tiles ({tile_size}px): {i}/{total}")
+        for i, res in enumerate(results):
+            if res is not None:
+                tiles.append(res[0])
+                features.append(res[1])
+            
+            if i % 200 == 0:
+                progress_callback((i / total) * 100, f"Loading: {i}/{total}")
 
     if not tiles:
-        raise Exception(f"Không tạo được tile nào ở size {tile_size}!")
+        raise Exception(f"Không tìm thấy ảnh hợp lệ trong thư mục tiles!")
 
-    tiles_arr = np.array(tiles, dtype=np.uint8)
-    colors_arr = np.array(colors, dtype=np.float32)
-    return tiles_arr, colors_arr
+    return np.array(tiles, dtype=np.uint8), np.array(features, dtype=np.float32)
 
-def build_index(colors_arr: np.ndarray):
-    return KDTreeNearestNeighbor(colors_arr)
-
-def render_single_level(target_img, tiles_arr, index, tile_size,
-                        progress_callback=None, frame_callback=None,
-                        frame_every=200, max_fps=30):
-    if progress_callback is None:
-        progress_callback = lambda p, msg: None
-
-    h, w = target_img.shape[:2]
-
-    mosaic = np.zeros_like(target_img) 
-
-    rows = range(0, h, tile_size)
-    cols = range(0, w, tile_size)
-    total_blocks = len(rows) * len(cols)
-    done = 0
-
-    min_dt = 1.0 / max(1, max_fps)
-    last_push = 0.0
-
-    for y in rows:
-        for x in cols:
-            # Cắt vùng ảnh gốc (ROI)
-            h_slice = min(tile_size, h - y)
-            w_slice = min(tile_size, w - x)
-            
-            roi = target_img[y:y + h_slice, x:x + w_slice]
-            
-            # Nếu ROI nhỏ hơn tile_size (ở biên), cần padding hoặc resize tạm để tính avg
-            avg = extract(roi)
-            
-            # Tìm tile gần nhất bằng KD-Tree
-            idx = index.query(avg)
-            
-            # Lấy tile kết quả và crop nếu ở biên
-            tile_match = tiles_arr[idx]
-            mosaic[y:y + h_slice, x:x + w_slice] = tile_match[:h_slice, :w_slice]
-
-            done += 1
-
-            # Update progress UI
-            if done % 100 == 0:
-                progress_callback((done / max(1, total_blocks)) * 100,
-                                    f"Ghép level {tile_size}px: {done}/{total_blocks}")
-
-            # Update Live Preview
-            if frame_callback is not None and (done % max(1, frame_every) == 0):
-                now = time.time()
-                if (now - last_push) >= min_dt:
-                    last_push = now
-                    frame_callback(mosaic) # Gửi ảnh về GUI
-
-    if frame_callback is not None:
-        frame_callback(mosaic)
-
-    return mosaic
+def resize_tiles_in_memory(base_tiles: np.ndarray, new_size: int, 
+                           progress_callback: Callable[[float, str], None]) -> Tuple[np.ndarray, np.ndarray]:
+    """Tạo tiles kích thước nhỏ hơn từ tiles đã load trên RAM."""
+    count = len(base_tiles)
+    progress_callback(0, f"Downscaling tiles về {new_size}px...")
+    
+    new_tiles = []
+    new_features = []
+    
+    for i, tile in enumerate(base_tiles):
+        small = cv2.resize(tile, (new_size, new_size), interpolation=cv2.INTER_AREA)
+        new_tiles.append(small)
+        
+        # Trích xuất lại đặc trưng ở size mới (quan trọng vì texture thay đổi theo size)
+        feat = extract(small)
+        if feat.shape[0] == 6:
+            feat[3:] *= TEXTURE_WEIGHT
+        new_features.append(feat)
+        
+        if i % 1000 == 0:
+             progress_callback((i / count) * 100, f"Resizing: {i}/{count}")
+             
+    return np.array(new_tiles, dtype=np.uint8), np.array(new_features, dtype=np.float32)
 
 def multi_resolution_mosaic(
     target_path: str,
     tiles_folder: str,
-    base_tile: int = 10,
+    base_tile: int = 15,
     levels: int = 3,
-    blend_factor: float = 0.0,
-    progress_callback: Callable[[float, str], None] = None,
+    blend_factor: float = 0.2,
+    progress_callback: Callable[[float, str], None] = lambda p, m: None,
     frame_callback=None,
-    frame_every: int = 200
+    frame_every: int = 150
 ) -> Tuple[np.ndarray, List[int]]:
-
-    if progress_callback is None:
-        progress_callback = lambda p, msg: None
-
-    # --- 1. Đọc ảnh gốc ---
-    target = cv2.imread(target_path)
-    if target is None:
-        raise Exception("Không đọc được ảnh gốc!")
-
-    progress_callback(1, "Đang quét danh sách file tiles...")
-    file_list = _list_image_files(tiles_folder)
-    if not file_list:
-        raise Exception("Thư mục tiles trống!")
     
+    # 1. Cấu hình Quadtree
+    # Ngưỡng chia cắt: Nếu độ lệch chuẩn trung bình vùng ảnh > ngưỡng này -> chia nhỏ
+    SPLIT_THRESHOLD = 20.0 
+
+    # --- SETUP DỮ LIỆU ---
+    target = cv2.imread(target_path)
+    if target is None: raise Exception("Lỗi đọc ảnh gốc!")
+    h_img, w_img = target.shape[:2]
+
+    file_list = _list_image_files(tiles_folder)
+    if not file_list: raise Exception("Thư mục tiles trống!")
+    
+    # Tính toán các level kích thước: [Max, ..., Min]
     sizes = level_sizes(base_tile, levels)
-    progress_callback(2, f"Multi-res levels: {sizes}")
+    max_size = sizes[0]
+    min_size = sizes[-1]
+    
+    progress_callback(5, f"Levels cấu hình: {sizes}")
 
-    final_mosaic = target.copy() # Khởi tạo bằng ảnh gốc
+    # --- LOAD & PREPARE TILES ---
+    # Database lưu tiles theo kích thước: {size: (tiles_array, kdtree)}
+    tiles_db = {}
 
-    for li, ts in enumerate(sizes):
-        # Crop ảnh gốc cho chẵn với tile_size (để xử lý dễ hơn)
-        h, w = target.shape[:2]
-        h_new = (h // ts) * ts
-        w_new = (w // ts) * ts
-        # Nếu ảnh quá nhỏ so với tile, bỏ qua level này
-        if h_new == 0 or w_new == 0:
-            continue
+    # 1. Load tiles ở size lớn nhất
+    base_t, base_f = prepare_tiles_parallel(file_list, max_size, progress_callback)
+    tiles_db[max_size] = (base_t, KDTreeNearestNeighbor(base_f))
+
+    # 2. Downscale cho các size nhỏ hơn
+    for sz in sizes[1:]:
+        t_arr, f_arr = resize_tiles_in_memory(base_t, sz, progress_callback)
+        tiles_db[sz] = (t_arr, KDTreeNearestNeighbor(f_arr))
+
+    # --- QUADTREE PROCESS ---
+    progress_callback(30, "Đang ghép tranh (Adaptive Mode)...")
+    mosaic = np.zeros_like(target)
+    
+    # Queue chứa (x, y, size). Bắt đầu với lưới lớn nhất.
+    queue = deque()
+    for y in range(0, h_img, max_size):
+        for x in range(0, w_img, max_size):
+            queue.append((x, y, max_size))
+
+    total_pixels = h_img * w_img
+    processed_pixels = 0
+    blocks_count = 0
+    
+    last_ui_update = time.time()
+
+    while queue:
+        x, y, sz = queue.popleft() # Dùng popleft (BFS) để hiển thị dần từ thô đến tinh
+        
+        # Xử lý biên ảnh
+        h_slice = min(sz, h_img - y)
+        w_slice = min(sz, w_img - x)
+        if h_slice <= 0 or w_slice <= 0: continue
+
+        roi = target[y:y+h_slice, x:x+w_slice]
+        
+        # Tính toán thống kê màu và texture của vùng ảnh đích (ROI)
+        # mean: (3,1), stddev: (3,1)
+        mean, stddev = cv2.meanStdDev(roi)
+        avg_std = np.mean(stddev)
+        
+        # QUYẾT ĐỊNH: Chia nhỏ hay Dừng?
+        # Chia nhỏ nếu: Chưa đạt size nhỏ nhất VÀ độ phức tạp chi tiết > ngưỡng
+        should_split = (sz > min_size) and (avg_std > SPLIT_THRESHOLD)
+
+        if should_split:
+            # Chia làm 4 ô con
+            half = sz // 2
+            queue.append((x, y, half))
+            queue.append((x + half, y, half))
+            queue.append((x, y + half, half))
+            queue.append((x + half, y + half, half))
+        else:
+            # TÌM ẢNH GHÉP (MATCHING)
+            # Lấy bộ dataset phù hợp kích thước
+            current_dataset = tiles_db.get(sz)
             
-        target_crop = target[:h_new, :w_new]
+            # Fallback nếu không có size chính xác (do biên ảnh lẻ), dùng size nhỏ nhất
+            if current_dataset is None:
+                current_dataset = tiles_db[min_size] 
 
-        # 3.1 Chuẩn bị tiles
-        tiles_arr, colors_arr = prepare_tiles_for_level(file_list, ts, progress_callback)
+            t_arr, tree = current_dataset
+            
+            # Tạo vector truy vấn (Query Vector)
+            # Tận dụng luôn kết quả mean, stddev vừa tính để ko phải gọi hàm extract() lại -> TỐI ƯU TỐC ĐỘ
+            mean_flat = mean.flatten().astype(np.float32)
+            
+            # Kiểm tra xem KD-Tree đang dùng 3 chiều (chỉ màu) hay 6 chiều (màu + texture)
+            if tree.colors.shape[1] == 6:
+                std_flat = stddev.flatten().astype(np.float32) * TEXTURE_WEIGHT
+                query_vec = np.concatenate([mean_flat, std_flat])
+            else:
+                query_vec = mean_flat
 
-        # 3.2 Build KD-tree
-        progress_callback(20, f"Build KD-tree level {ts}...")
-        index = build_index(colors_arr)
+            # Query KD-Tree
+            idx_match = tree.query(query_vec)
+            best_tile = t_arr[idx_match]
 
-        # 3.3 Render mosaic
-        progress_callback(30, f"Render mosaic level {ts}...")
-        mosaic_lv = render_single_level(
-            target_crop,
-            tiles_arr,
-            index,
-            ts,
-            progress_callback=progress_callback,
-            frame_callback=frame_callback,
-            frame_every=frame_every
-        )
+            # Gán vào ảnh kết quả (cắt nếu ở biên)
+            if best_tile.shape[:2] != (h_slice, w_slice):
+                # Resize nhẹ nếu kích thước không khớp hoàn toàn (do fallback)
+                tile_resized = cv2.resize(best_tile, (w_slice, h_slice))
+                mosaic[y:y+h_slice, x:x+w_slice] = tile_resized
+            else:
+                mosaic[y:y+h_slice, x:x+w_slice] = best_tile[:h_slice, :w_slice]
 
-        final_mosaic = mosaic_lv
-        progress_callback(100, f"Hoàn tất level {ts}px")
-        
-        time.sleep(0.5)
+            # Cập nhật tiến độ
+            processed_pixels += (h_slice * w_slice)
+            blocks_count += 1
+            
+            if blocks_count % frame_every == 0:
+                pct = min(100, int(processed_pixels / total_pixels * 100))
+                progress_callback(30 + (pct * 0.7), f"Rendering: {pct}%")
+                
+                # Cập nhật preview (giới hạn 30fps)
+                if frame_callback:
+                    now = time.time()
+                    if now - last_ui_update > 0.033:
+                        frame_callback(mosaic)
+                        last_ui_update = now
 
-    # --- 4. Blend với ảnh gốc ---
+    # Final preview update
+    if frame_callback: frame_callback(mosaic)
+    
+    # --- BLENDING ---
     if blend_factor > 0:
-        progress_callback(95, "Blending với ảnh gốc...")
-        # Resize ảnh gốc khớp với final_mosaic hiện tại (vì mosaic có thể bị crop chút xíu)
-        mh, mw = final_mosaic.shape[:2]
-        target_resized = cv2.resize(target, (mw, mh))
-        
-        final_mosaic = cv2.addWeighted(
-            final_mosaic,
-            1.0 - blend_factor,
-            target_resized,
-            blend_factor,
-            0
-        )
+        progress_callback(100, "Đang hòa trộn (Blending)...")
+        # Overlay ảnh gốc mờ lên trên mosaic để làm mềm các cạnh
+        mosaic = cv2.addWeighted(mosaic, 1.0 - blend_factor, target, blend_factor, 0)
 
-    progress_callback(100, "Xong!")
-    return final_mosaic, sizes
+    progress_callback(100, "Hoàn tất!")
+    return mosaic, sizes
