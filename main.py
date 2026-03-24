@@ -1,6 +1,5 @@
-import tkinter as tk
 import ctypes
-from ui.main_window import App
+from src.app.main import run
 
 if __name__ == "__main__":
     try:
@@ -8,5 +7,4 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    app = App()
-    app.mainloop()
+    run()
